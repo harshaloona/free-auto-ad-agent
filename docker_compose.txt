@@ -1,0 +1,79 @@
+# Docker Compose for local development and Railway deployment
+# Save as: docker-compose.yml
+
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://user:password@postgres:5432/adagent
+      - TORCH_DEVICE=cuda
+      - MODEL_CACHE_DIR=/app/models_cache
+      - VIDEO_QUALITY=fast
+      - STORAGE_TYPE=local
+      - LOCAL_STORAGE_PATH=/app/generated_videos
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./models_cache:/app/models_cache
+      - ./generated_videos:/app/generated_videos
+      - /tmp:/tmp
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  worker:
+    build: .
+    command: celery -A backend.workers.celery_worker worker --loglevel=info --concurrency=1
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://user:password@postgres:5432/adagent
+      - TORCH_DEVICE=cuda
+      - MODEL_CACHE_DIR=/app/models_cache
+      - VIDEO_QUALITY=fast
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./models_cache:/app/models_cache
+      - ./generated_videos:/app/generated_videos
+      - /tmp:/tmp
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=adagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+  postgres_data:
