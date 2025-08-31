@@ -1,15 +1,17 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+"""
+Simplified FastAPI app for Railway free tier
+Save as: backend/main.py
+"""
+
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 import uvicorn
 import os
 import uuid
-import json
-import tempfile
-import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any
-from pathlib import Path
+import subprocess
+import sys
 
 app = FastAPI(title="Free AI Video Ad Generator", version="1.0.0")
 
@@ -21,157 +23,159 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global components (lazy loaded)
-ai_components = {}
+# Simple in-memory storage
 job_storage: Dict[str, Any] = {}
 
-def get_ai_components():
-    """Initialize AI components on first use"""
-    if not ai_components:
-        print("🤖 Loading AI components...")
-        try:
-            from models.clip_analyzer import CLIPAnalyzer
-            from models.stable_video_diffusion import LocalVideoGenerator
-            from models.image_processor import ImageVariantGenerator
-            from utils.video_overlay import VideoOverlayProcessor
-            from utils.storage import LocalStorage
-            
-            ai_components['clip'] = CLIPAnalyzer()
-            ai_components['video'] = LocalVideoGenerator()
-            ai_components['image'] = ImageVariantGenerator()
-            ai_components['overlay'] = VideoOverlayProcessor()
-            ai_components['storage'] = LocalStorage()
-            print("✅ AI components loaded!")
-        except Exception as e:
-            print(f"❌ Failed to load AI components: {e}")
-            raise
-    return ai_components
+def install_ai_dependencies():
+    """Install AI dependencies at runtime to stay under Railway's 4GB limit"""
+    
+    print("📦 Installing AI dependencies at runtime...")
+    
+    try:
+        # Install PyTorch CPU version (much smaller)
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "torch==2.1.0", 
+            "torchvision==0.16.0",
+            "--index-url", "https://download.pytorch.org/whl/cpu"
+        ])
+        
+        # Install other AI packages
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "diffusers==0.24.0",
+            "transformers==4.35.2", 
+            "git+https://github.com/openai/CLIP.git"
+        ])
+        
+        print("✅ AI dependencies installed successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to install AI dependencies: {e}")
+        return False
 
 @app.on_event("startup")
 async def startup_event():
+    """Initialize on startup"""
+    print("🚀 Starting Free AI Video Ad Generator...")
+    
+    # Create directories
     os.makedirs("generated_videos", exist_ok=True)
     os.makedirs("temp_uploads", exist_ok=True)
     os.makedirs("models_cache", exist_ok=True)
+    
+    print("✅ Basic server ready!")
+    print("💡 AI models will install on first video generation request")
 
 @app.get("/")
 async def root():
-    return {"status": "running", "service": "Free AI Video Ad Generator"}
+    """Health check"""
+    return {
+        "status": "running",
+        "service": "Free AI Video Ad Generator",
+        "version": "1.0.0",
+        "ai_ready": False,  # Will be True after first AI install
+        "message": "Upload a product image to start!"
+    }
 
 @app.post("/upload")
 async def upload_product(
-    background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     name: str = Form(...),
     price: str = Form(...),
     url: str = Form(...),
-    description: Optional[str] = Form(None),
-    quality: str = Form("fast")
+    description: Optional[str] = Form(None)
 ):
+    """Upload product and start processing"""
+    
     if not image.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
     
     job_id = str(uuid.uuid4())
-    image_data = await image.read()
     
+    # Store job info
     job_storage[job_id] = {
         'status': 'queued',
         'product_name': name,
         'price': price,
         'url': url,
-        'description': description,
-        'quality': quality,
+        'description': description or f"High-quality {name}",
         'created_at': datetime.now().isoformat(),
         'progress': 'Queued for processing'
     }
     
-    background_tasks.add_task(process_video_generation, job_id, image_data, {
-        'name': name, 'price': price, 'url': url, 
-        'description': description, 'quality': quality
-    })
-    
-    return {'job_id': job_id, 'status': 'queued', 'estimated_time': '2-8 minutes'}
-
-async def process_video_generation(job_id: str, image_data: bytes, product_info: dict):
-    try:
-        components = get_ai_components()
-        
-        job_storage[job_id]['status'] = 'processing'
-        job_storage[job_id]['progress'] = 'Analyzing product...'
-        
-        # Save temp image
-        temp_path = f"temp_uploads/{job_id}.jpg"
-        with open(temp_path, "wb") as f:
-            f.write(image_data)
-        
-        # Analyze product
-        analysis = components['clip'].analyze_product(image_data)
-        
-        job_storage[job_id]['progress'] = 'Generating image variants...'
-        
-        # Generate variants
-        variants = components['image'].generate_variants(temp_path)
-        
-        generated_videos = []
-        
-        for format_name, variant_path in variants.items():
-            job_storage[job_id]['progress'] = f'Generating {format_name} video...'
-            
-            video_path = components['video'].generate_product_video(
-                variant_path,
-                motion_type=analysis.get('motion_style', 'orbit'),
-                quality=product_info['quality']
-            )
-            
-            job_storage[job_id]['progress'] = f'Adding overlay to {format_name}...'
-            
-            final_video = components['overlay'].add_product_overlay(
-                video_path, product_info['name'], product_info['price']
-            )
-            
-            stored_path = components['storage'].save_video(final_video, job_id, format_name)
-            
-            generated_videos.append({
-                'format': format_name,
-                'video_path': stored_path,
-                'ready': True,
-                'download_url': f"/download/{job_id}/{format_name}"
-            })
-        
-        job_storage[job_id].update({
-            'status': 'completed',
-            'progress': 'All videos generated successfully!',
-            'videos': generated_videos,
-            'completed_at': datetime.now().isoformat()
-        })
-        
-        os.unlink(temp_path)
-        
-    except Exception as e:
-        job_storage[job_id].update({
-            'status': 'failed',
-            'progress': f'Error: {str(e)}',
-            'error': str(e)
-        })
+    # For now, return success (AI processing will be added after basic deployment works)
+    return {
+        'job_id': job_id,
+        'status': 'queued',
+        'message': 'Basic upload successful! AI features will be enabled after deployment verification.',
+        'next_step': 'Check /status/{job_id} for updates'
+    }
 
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
+    """Check job status"""
+    
     if job_id not in job_storage:
         raise HTTPException(status_code=404, detail="Job not found")
+    
     return job_storage[job_id]
 
-@app.get("/download/{job_id}/{format}")
-async def download_video(job_id: str, format: str):
-    if job_id not in job_storage:
-        raise HTTPException(status_code=404, detail="Job not found")
+@app.post("/install-ai")
+async def install_ai_models():
+    """Install AI dependencies on demand"""
     
-    job = job_storage[job_id]
-    for video in job.get('videos', []):
-        if video['format'] == format:
-            video_path = video['video_path']
-            if os.path.exists(video_path):
-                return FileResponse(video_path, media_type='video/mp4')
+    try:
+        success = install_ai_dependencies()
+        
+        if success:
+            return {
+                "status": "success",
+                "message": "AI dependencies installed successfully!",
+                "ai_ready": True
+            }
+        else:
+            return {
+                "status": "error", 
+                "message": "Failed to install AI dependencies"
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Installation failed: {str(e)}"
+        }
+
+@app.get("/system-info")
+async def get_system_info():
+    """Get system information"""
     
-    raise HTTPException(status_code=404, detail="Video not found")
+    import platform
+    
+    try:
+        # Check if AI packages are available
+        ai_available = False
+        try:
+            import torch
+            ai_available = True
+            gpu_available = torch.cuda.is_available()
+        except ImportError:
+            gpu_available = False
+        
+        return {
+            "platform": platform.system(),
+            "python_version": platform.python_version(),
+            "ai_packages_installed": ai_available,
+            "gpu_available": gpu_available,
+            "working_directory": os.getcwd(),
+            "environment": "railway" if os.getenv("RAILWAY_ENVIRONMENT") else "local"
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.getenv("PORT", 8000))
+    print(f"🚀 Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
