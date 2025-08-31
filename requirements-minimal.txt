@@ -1,0 +1,15 @@
+# Minimal requirements for Railway free tier
+# Save as: requirements-minimal.txt
+# This keeps the Docker image under 4GB
+
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+requests==2.31.0
+python-dotenv==1.0.0
+aiofiles==23.2.1
+Pillow==10.1.0
+numpy==1.24.3
+
+# AI models will be downloaded at runtime (not during build)
+# This keeps the Docker image small
